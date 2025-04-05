@@ -26,7 +26,6 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
-#include "driver/i2c.h"
 
 /*
  * Global configurations and handles.
