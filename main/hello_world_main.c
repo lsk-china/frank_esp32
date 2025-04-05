@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <inttypes.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,33 +29,46 @@
 #include "driver/i2c.h"
 
 /*
- * Global variables and constants.
+ * Global configurations and handles.
  */
 
 // Logging
 #define TAG "Frank's App"
 
+// Tasks
+// Greater stack depth to prevent SOF
+#define RECORD_TASK_STACK_SIZE (1024 * 8)
+#define PLAY_TASK_STACK_SIZE   (1024 * 10)
+#define CLEAR_TASK_STACK_SIZE  (1024 * 4)
+
 // Network
-#define WIFI_SSID   ""
-#define WIFI_PASS   ""
-#define SERVER_IP   ""
-#define SEND_PORT   27012
-#define LISTEN_PORT 27011
+#define WIFI_SSID     ""
+#define WIFI_PASS     ""
+#define SERVER_IP     "192.168.1.8"
+#define SEND_PORT     27012
+#define LISTEN_PORT   27011
+#define COMMAND_PORT  27013
 TaskHandle_t receive_task_handle;
 
 // Buttons and interrupts
 TaskHandle_t task_handle;
 /*
  * The INPUT_GPIO_MASK is an uint64_t integer, in which each bit represents a GPIO on the device.
- * For exp, here I shift 1 to right by 38 bits, so the 38th bit of INPUT_GPIO_MASK is set to 1,
- *  meaning that I'm going to perform operations on GPIO38, which is connected to the button that
+ * For exp, here I shift 1 to right by 40 bits, so the 40th bit of INPUT_GPIO_MASK is set to 1,
+ *  meaning that I'm going to perform operations on GPIO40, which is connected to the button that
  *  controls the microphone.
  * If you hope to initialize some new pins, just perform or operates, to set the corresponding to 1,
  *  marking that GPIO pin is to be operated.
  */
-#define INPUT_GPIO_MASK_38 (1ULL << 38)
+#define SPEAK_GPIO_MASK (1ULL << 40)         // Pin 40 for speak
+#define CLEAR_GPIO_MASK (1ULL << 39)         // Pin 39 for clear chat history
+#define SPEAK_GPIO      GPIO_NUM_40
+#define CLEAR_GPIO      GPIO_NUM_39
+#define SPEAK_INTR_ID   0
+#define CLEAR_INTR_ID   1
 
 // I2S devices (microphone and amplifier)
+#define WITH_I2S
 #define RECORD_RATE    8000
 #define PLAY_RATE      32000
 #define RECORD_SD_PIN  GPIO_NUM_6
@@ -69,8 +81,11 @@ TaskHandle_t task_handle;
 #define PLAY_I2S_NUM   I2S_NUM_1
 #define READ_BUF_SIZE  2048  // Don't set too high before PSRAM problem is solved....
 #define WRITE_BUF_SIZE 2048
+#define DMA_BUFFER_CNT 8
+#define DMA_BUFFER_LEN 1024
 
 // OLED Configurations
+#define WITH_OLED
 #define LCD_PIXEL_CLOCK_HZ              (400*1000)
 #define LCD_PIN_SDA                     41      // SDA connect to GPIO41
 #define LCD_PIN_SCL                     42      // SCL connect to GPIO42
@@ -102,6 +117,7 @@ void oled_clear_screen(void);
 void record_task(void *arg);
 void do_record(void);
 void do_play(void* arg);
+void clear_history_task(void *arg);
 
 /*
  * Functions to connect to Wi-Fi, copied from
@@ -176,18 +192,25 @@ void wifi_connection()
  */
 
 void IRAM_ATTR gpio_isr_handler(void* arg) {
-    // BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    // vTaskNotifyGiveFromISR(task_handle, &xHigherPriorityTaskWoken);
-    // if (xHigherPriorityTaskWoken) {
-    //     portYIELD_FROM_ISR();
-    // }
-    xTaskCreate(record_task, "record_task", 2048, NULL, 5, NULL);
+    // Dispatch interrupt to handler tasks
+    int source = (int) arg; // As arg is just an integer, so we don't need to dereference
+    switch (source)
+    {
+    case SPEAK_INTR_ID:
+        xTaskCreate(record_task, "record_task", RECORD_TASK_STACK_SIZE, NULL, 5, NULL);
+        break;
+    case CLEAR_INTR_ID:
+        xTaskCreate(clear_history_task, "clear_history_task", CLEAR_TASK_STACK_SIZE, NULL, 5, NULL);
+        break;
+    default:
+        // Won't happen, just to satisfy clang-tidy's complaint
+    }
 }
 
 void record_task(void *arg)
 {
     vTaskDelay(20 / portTICK_PERIOD_MS); // Debouncing
-    if (!gpio_get_level(GPIO_NUM_38))
+    if (!gpio_get_level(SPEAK_GPIO))
     {
         ESP_LOGI(TAG, "recording start");
         do_record();
@@ -196,13 +219,13 @@ void record_task(void *arg)
     vTaskDelete(NULL);                  // Must exit explicitly via vTaskDelete.
 }
 
-
 /*
  * I2S devices initialization
  */
 
 void i2s_initialization(void)
 {
+#ifdef WITH_I2S
     // Recoder setup
     i2s_config_t i2s_config_record = {
         .mode = I2S_MODE_MASTER | I2S_MODE_RX,
@@ -211,8 +234,8 @@ void i2s_initialization(void)
         .channel_format = I2S_CHANNEL_FMT_ALL_LEFT,            // Only record on left channel
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = 0,
-        .dma_buf_count = 8,
-        .dma_buf_len = 64,
+        .dma_buf_count = DMA_BUFFER_CNT,
+        .dma_buf_len = DMA_BUFFER_LEN,
         .use_apll = false,
     };
     i2s_driver_install(RECORD_I2S_NUM, &i2s_config_record, 0, NULL);
@@ -231,10 +254,12 @@ void i2s_initialization(void)
         .bits_per_sample = 16,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,   // Play both left and right channels
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = 0,
-        .dma_buf_count = 8,
-        .dma_buf_len = 64,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = DMA_BUFFER_CNT,
+        .dma_buf_len = DMA_BUFFER_LEN,
+        .tx_desc_auto_clear = true,
         .use_apll = false,
+        .fixed_mclk = 0
     };
     i2s_driver_install(PLAY_I2S_NUM, &i2s_config_play, 0, NULL);
     i2s_pin_config_t play_pin_config = {
@@ -244,6 +269,7 @@ void i2s_initialization(void)
         .data_out_num = PLAY_SD_PIN,
     };
     i2s_set_pin(PLAY_I2S_NUM, &play_pin_config);
+#endif
 }
 
 /*
@@ -251,6 +277,7 @@ void i2s_initialization(void)
  */
 void oled_initialization(void)
 {
+#ifdef WITH_OLED
     // Create the i2c bus handle
     ESP_LOGI(TAG, "Initializing OLED...");
     i2c_master_bus_handle_t i2c_bus = NULL;
@@ -313,6 +340,7 @@ void oled_initialization(void)
     // Load the font
     lv_style_init(&style);
     lv_style_set_text_font(&style, &lxwk_common_20);
+#endif
 }
 
 /*
@@ -320,6 +348,7 @@ void oled_initialization(void)
  */
 void oled_draw_text(const char* text)
 {
+#ifdef WITH_OLED
     if (lvgl_port_lock(0)) // Lock the mutex due to the LVGL APIs are not thread-safe
     {
         lv_obj_t *scr = lv_disp_get_scr_act(oled_handle);
@@ -332,6 +361,7 @@ void oled_draw_text(const char* text)
         // Release the mutex
         lvgl_port_unlock();
     }
+#endif
 }
 
 /*
@@ -339,7 +369,9 @@ void oled_draw_text(const char* text)
  */
 void oled_clear_screen(void)
 {
+#ifdef WITH_OLED
     lv_obj_clean(lv_scr_act());
+#endif
 }
 
 /*
@@ -369,9 +401,10 @@ void do_record(void)
     ESP_LOGI(TAG, "Socket connected");
 
     // Record voice and send
-    while (!gpio_get_level(GPIO_NUM_38)) // Record if button is not released.
+    while (!gpio_get_level(SPEAK_GPIO)) // Record if button is not released.
     {
         size_t bytes_read;
+#ifdef WITH_I2S
         esp_err_t ret = i2s_read(
             RECORD_I2S_NUM,
             read_buf,
@@ -380,6 +413,9 @@ void do_record(void)
             portMAX_DELAY          // No timeout.
         );
         if (ret != ESP_OK) continue;
+#else
+        bytes_read = 0;
+#endif
         if (send(sock, read_buf, bytes_read, 0) < 0)
         {
             ESP_LOGE(TAG, "Socket send failed: %d", errno);
@@ -390,6 +426,10 @@ void do_record(void)
     shutdown(sock, 0);
     close(sock);
     free(read_buf);
+
+    // clear screen and prompt user to wait for resp
+    oled_clear_screen();
+    oled_draw_text("Thinking...");
 }
 
 /*
@@ -458,51 +498,81 @@ void do_play(void *arg)
         if (type == 'a')    // Audio
         {
             size_t bytes_written ; // Dummy variable
+            int16_t *audio_buffer = (int16_t *)recv_buf;
+#ifdef WITH_I2S
+            i2s_zero_dma_buffer(PLAY_I2S_NUM);
+            i2s_stop(PLAY_I2S_NUM);
+            i2s_start(PLAY_I2S_NUM);
+#endif
             // Download audio and play
             while ((bytes_read = read(sock, recv_buf, 1024)) > 0)
             {
-                i2s_write(
+#ifdef WITH_I2S
+                for (int i = 0; i < bytes_read/2; i++) {
+                    // Gain control for each sample
+                    float sample = audio_buffer[i] * 0.8f; // Reduce volume
+                    audio_buffer[i] = (int16_t)sample;
+                }
+                int ret = i2s_write(
                     PLAY_I2S_NUM,
                     recv_buf,
                     bytes_read,
                     &bytes_written,
                     portMAX_DELAY
                 );
-            }
-        } else {            // Text
-            // Allocate memory for the text
-            char *text = NULL;
-            size_t offset = 0;  // Offset to write to the memory
-            // Receive text and append to the memory
-            while ((bytes_read = read(sock, recv_buf, 1024)) > 0)
-            {
-                // Allocate or expand the memory for save the incoming text
-                if (text == NULL)
-                {
-                    text = (char *) malloc(bytes_read + 1);
-                    memset(text, 0, bytes_read + 1);
-                } else
-                {
-                    text = (char *) realloc(text, bytes_read); // Use realloc to expand memory
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "I2S write error: %d", ret);
+                    break;
                 }
-                // Save downloaded text to memory
-                // Add recv_buf by offset, so that new data won't override existing data
-                memcpy(text + offset, recv_buf, bytes_read);
-                offset += bytes_read;
+                // Wait 1ms to sync
+                vTaskDelay(1 / portTICK_PERIOD_MS);
+#endif
             }
-            if (text == NULL)
-                continue;
-            // Complete the '\0' to mark the end of string
-            text[offset] = '\0';
-            // ESP_LOGI(TAG, "Text received: %s", text);
-            // Clear and display the text
+#ifdef WITH_I2S
+            // Cleanup
+            i2s_zero_dma_buffer(PLAY_I2S_NUM);
+#endif
+        } else {            // Text
+            read(sock, recv_buf, 512);
             oled_clear_screen();
-            oled_draw_text(text);
-            // Cleanup, release the memory
-            free(text);
+            oled_draw_text((char *) recv_buf);
         }
-
     }
+}
+
+/*
+ * Clear chat history logic
+ */
+
+void clear_history_task(void *arg)
+{
+    ESP_LOGI(TAG, "Sending clear history cmd");
+    // Connect to server
+    struct sockaddr_in dest_addr;
+    inet_pton(AF_INET, SERVER_IP, &dest_addr.sin_addr);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(COMMAND_PORT);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (sock < 0)
+    {
+        ESP_LOGE(TAG, "Socket creation failed: %d", errno);
+        return;
+    }
+    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TAG, "Socket unable to connect: errno %d", errno);
+        return;
+    }
+    ESP_LOGI(TAG, "Socket connected");
+
+    // Send cmd
+    char * command = "clear history";
+    send(sock, command, strlen(command), 0);
+
+    // Disconnect
+    shutdown(sock, 0);
+    close(sock);
+    ESP_LOGI(TAG, "Clear history cmd sent");
 }
 
 void app_main(void)
@@ -518,35 +588,30 @@ void app_main(void)
     oled_initialization();
 
     /*
-     * Here we initialize the 38th GPIO.
+     * Here we initialize the GPIOs.
      * Mode is input, pull up enabled (since we connected the button to GND),
      * pull down disabled, interrupt is triggered at a falling edge
      */
-    gpio_config_t io_conf_38 = {};
-    io_conf_38.mode = GPIO_MODE_INPUT;
-    io_conf_38.pull_up_en = GPIO_PULLUP_ENABLE;
-    io_conf_38.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf_38.intr_type = GPIO_INTR_NEGEDGE;
-//    io_conf_38.intr_type = GPIO_INTR_DISABLE;
-    io_conf_38.pin_bit_mask = INPUT_GPIO_MASK_38;
-    gpio_config(&io_conf_38);
+    gpio_config_t io_conf = {};
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_NEGEDGE;
+    io_conf.pin_bit_mask = SPEAK_GPIO_MASK;
+    gpio_config(&io_conf);
+    // Since we use the same configuration for clear pin, just replace the mask is enough
+    io_conf.pin_bit_mask = CLEAR_GPIO_MASK;
+    gpio_config(&io_conf);
+
     // Initialize GPIO interrupt
-    gpio_intr_enable(GPIO_NUM_38);
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(GPIO_NUM_38, gpio_isr_handler, NULL);
+    gpio_intr_enable(SPEAK_GPIO);
+    gpio_intr_enable(CLEAR_GPIO);
+    // The third argument will be passed to "arg" of gpio_isr_handler
+    // We use it to distinguish the source pin of the event
+    gpio_isr_handler_add(SPEAK_GPIO, gpio_isr_handler, (void *) SPEAK_INTR_ID);
+    gpio_isr_handler_add(CLEAR_GPIO, gpio_isr_handler, (void *) CLEAR_INTR_ID);
 
     // Run play audio task
-    xTaskCreate(do_play, "play", 2048, NULL, 10, NULL);
-
-    // while (1)
-    // {
-    //     if(!gpio_get_level(GPIO_NUM_38))
-    //     {
-    //         vTaskDelay(20 / portTICK_PERIOD_MS);
-    //         if (!gpio_get_level(GPIO_NUM_38))
-    //         {
-    //             do_record();
-    //         }
-    //     }
-    // }
+    xTaskCreate(do_play, "play", PLAY_TASK_STACK_SIZE, NULL, 10, NULL);
 }
