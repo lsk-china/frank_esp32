@@ -6,6 +6,12 @@
 #define NETWORK_H
 
 #include "hardware.h"
+#include <pb.h>
+#include <pb_decode.h>
+#include "proto/packet.pb.h"
+
+#define NETWORK_TASK_STACK_SIZE 4096
+#define NETWORK_TASK_PRIORITY 5
 
 /**
  * The callback function to process incoming data.
@@ -70,6 +76,13 @@ typedef enum
 } command_t;
 
 /**
+ * Structure for messages to be sent to network task
+ */
+typedef struct {
+    Packet *packet;
+} network_send_message_t;
+
+/**
  * Start the network task, with the network implementation
  * @param provider the communication implementation
  */
@@ -86,7 +99,7 @@ void send_voice_to_server(void *data, struct audio_metadata metadata);
  * Send a command to the server
  * @param command the command
  */
-void send_command_to_server(enum command_t command);
+void send_command_to_server(command_t command);
 
 /**
  * Set the callback to process a text packet
@@ -100,4 +113,4 @@ void set_on_text_packet(on_text_packet_callback_t callback);
  */
 void set_on_audio_packet(on_audio_packet_callback_t callback);
 
-#endif //NETWORK_H
+#endif // NETWORK_H
