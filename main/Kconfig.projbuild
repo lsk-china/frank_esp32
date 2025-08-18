@@ -5,6 +5,12 @@ menu "Firefly Chatbot Configuration"
         help
             Specifies which server will this device communicate with.
 
+    config WIFI_SSID
+        string "Wi-FI SSID"
+
+    config WIFI_PASSWORD
+        string "Wi-Fi Password"
+
     config BUILD_CELLULAR
         bool "Build ML307R support"
         default n
