@@ -8,7 +8,7 @@
 #include "hardware.h"
 #include <pb.h>
 #include <pb_decode.h>
-#include "proto/packet.pb.h"
+#include "proto/packet.pb-c.h"
 
 #define NETWORK_TASK_STACK_SIZE 4096
 #define NETWORK_TASK_PRIORITY 5
@@ -86,7 +86,7 @@ typedef struct {
  * Start the network task, with the network implementation
  * @param provider the communication implementation
  */
-void start_network_task(struct network_provider *provider);
+void initialize_network(struct network_provider *provider);
 
 /**
  * Send a Audio packet with recorded voice to the server.
@@ -112,5 +112,29 @@ void set_on_text_packet(on_text_packet_callback_t callback);
  * @param callback the callback
  */
 void set_on_audio_packet(on_audio_packet_callback_t callback);
+
+/*
+ * --- PRIVATE FUNCTIONS ---
+ */
+
+/**
+ * Starts a new task to handle incoming data.
+ * This function should be running in the task of network_provider
+ * @param data data
+ * @param size size of data
+ */
+static void on_data(void *data, size_t size);
+
+/**
+ * Actually handles the data.
+ * This function should be running in a new task dedicated for this packet.
+ * @param pvParameters a data_size_bundle structure
+ */
+static void process_data_task(void *pvParameters);
+
+/**
+ * Send a packet to server
+ */
+static void do_send_packet(Packet packet);
 
 #endif // NETWORK_H
