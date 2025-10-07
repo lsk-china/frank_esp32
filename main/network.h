@@ -82,14 +82,18 @@ void initialize_network(struct network_provider *provider);
  * Send a Audio packet with recorded voice to the server.
  * @param data the PCM data
  * @param metadata the metadata of the audio
+ * @return 0, if packet is successfully sent.
+ *		   A negative indicating the error, if packet is not sent.
  */
-void send_voice_to_server(void *data, struct audio_metadata metadata);
+int send_voice_to_server(void *data, struct audio_metadata metadata);
 
 /**
  * Send a command to the server
  * @param command the command
+ * @return 0, if packet is successfully sent.
+ *		   A negative indicating the error, if packet is not sent.
  */
-void send_command_to_server(command_t command);
+int send_command_to_server(command_t command);
 
 /**
  * Set the callback to process a text packet

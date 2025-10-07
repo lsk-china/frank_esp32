@@ -14,6 +14,7 @@ SRCS
         "network_provider_wifi.h"
         "proto/packet.pb-c.h"
         "font_lxwk.c"
+        "errors.h"
 INCLUDE_DIRS
         "."
         "./proto"

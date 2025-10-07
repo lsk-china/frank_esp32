@@ -30,8 +30,10 @@ void process_data_task(void *pvParameters);
 /**
  * Send a packet to server
  * @param packet Packet to be sent
+ * @return 0, if packet is successfully sent.
+ *		   A negative indicating the error, if packet is not sent.
  */
-void do_send_packet(Packet packet);
+int do_send_packet(Packet packet);
 
 // Callbacks
 on_text_packet_callback_t on_text_packet;
@@ -128,7 +130,7 @@ cleanup:
     vTaskDelete(NULL);
 }
 
-void do_send_packet(Packet packet)
+int do_send_packet(Packet packet)
 {
     // Serialize
     size_t len = packet__get_packed_size(&packet);
@@ -136,13 +138,14 @@ void do_send_packet(Packet packet)
     packet__pack(&packet, buffer);
 
     // Send to network_provider
-    current_provider->send(buffer, len);
+    int ret = current_provider->send(buffer, len);
 
     // Cleanup
     free(buffer);
+    return ret > 0 ? 0 : ret;
 }
 
-void send_voice_to_server(void *data, struct audio_metadata metadata)
+int send_voice_to_server(void *data, struct audio_metadata metadata)
 {
     // Pack audio data
     Audio audio = AUDIO__INIT;
@@ -161,14 +164,15 @@ void send_voice_to_server(void *data, struct audio_metadata metadata)
     memcpy(&audio, packet.audio, sizeof(audio));
 
     // Send
-    do_send_packet(packet);
+    int ret = do_send_packet(packet);
 
     // cleanup
     free(packet.head);
     free(packet.audio);
+    return ret;
 }
 
-void send_command_to_server(command_t command)
+int send_command_to_server(command_t command)
 {
     // Do nearly the same thing as the previous function.
     Command cmd = COMMAND__INIT;
@@ -182,8 +186,9 @@ void send_command_to_server(command_t command)
     packet.command = malloc(sizeof(Command));
     memcpy(packet.command, &cmd, sizeof(Command));
 
-    do_send_packet(packet);
+    int ret = do_send_packet(packet);
 
     free(packet.head);
     free(packet.command);
+    return ret;
 }
